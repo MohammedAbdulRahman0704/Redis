@@ -1,0 +1,2 @@
+# Redis Project
+Initial setup
