@@ -1,54 +1,71 @@
+# core/server.py
 import socket
 import threading
+import time
 
 data_store = {}
+expiry_store = {}
 
-def handle_client(client_socket, address):
-    print(f"New connection from {address}")
+def handle_client(conn, addr):
+    print(f"New connection from {addr}")
     while True:
         try:
-            data = client_socket.recv(1024).decode().strip()
+            data = conn.recv(1024).decode().strip()
             if not data:
                 break
-            print(f"Received from {address}: {data}")
-            parts = data.split()
-            if not parts:
-                continue
+            print(f"Received from {addr}: {data}")
 
+            parts = data.split()
             command = parts[0].upper()
 
             if command == "PING":
-                client_socket.sendall(b"+PONG\r\n")
-            elif command == "ECHO":
-                message = " ".join(parts[1:])
-                client_socket.sendall(f"{message}\r\n".encode())
-            elif command == "SET" and len(parts) >= 3:
+                conn.sendall(b"+PONG\r\n")
+            elif command == "ECHO" and len(parts) > 1:
+                message = ' '.join(parts[1:])
+                conn.sendall(f"{message}\r\n".encode())
+            elif command == "SET":
                 key = parts[1]
-                value = " ".join(parts[2:])
+                value = parts[2]
                 data_store[key] = value
-                client_socket.sendall(b"+OK\r\n")
-            elif command == "GET" and len(parts) == 2:
+
+                # Check for expiry
+                if len(parts) > 4 and parts[3].upper() == "EX":
+                    try:
+                        seconds = int(parts[4])
+                        expiry_store[key] = time.time() + seconds
+                    except ValueError:
+                        conn.sendall(b"-ERR Invalid expiry time\r\n")
+                        continue
+                elif key in expiry_store:
+                    expiry_store.pop(key)  # Remove old expiry if any
+
+                conn.sendall(b"+OK\r\n")
+            elif command == "GET":
                 key = parts[1]
-                value = data_store.get(key)
-                if value is not None:
-                    client_socket.sendall(f"${len(value)}\r\n{value}\r\n".encode())
+                if key in expiry_store and time.time() > expiry_store[key]:
+                    data_store.pop(key, None)
+                    expiry_store.pop(key, None)
+                    conn.sendall(b"$-1\r\n")
+                elif key in data_store:
+                    value = data_store[key]
+                    conn.sendall(f"${len(value)}\r\n{value}\r\n".encode())
                 else:
-                    client_socket.sendall(b"$-1\r\n")
+                    conn.sendall(b"$-1\r\n")
             else:
-                client_socket.sendall(b"-ERR unknown command\r\n")
-        except ConnectionResetError:
+                conn.sendall(b"-ERR unknown command\r\n")
+        except Exception as e:
+            print(f"Error: {e}")
             break
+    conn.close()
 
-    client_socket.close()
+def start_server(host="127.0.0.1", port=6379):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((host, port))
+    server_socket.listen()
 
-# ✅ Wrap this in a function
-def start_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("127.0.0.1", 6379))
-    server.listen(5)
-    print("Redis-like server is running on 127.0.0.1:6379...")
+    print(f"Redis-like server is running on {host}:{port}...")
 
     while True:
-        client_socket, addr = server.accept()
-        client_handler = threading.Thread(target=handle_client, args=(client_socket, addr))
-        client_handler.start()
+        client_socket, addr = server_socket.accept()
+        client_thread = threading.Thread(target=handle_client, args=(client_socket, addr))
+        client_thread.start()
