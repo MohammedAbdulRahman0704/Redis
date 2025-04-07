@@ -77,6 +77,17 @@ def handle_client(conn, addr):
                         conn.sendall(f":{ttl}\r\n".encode())
                 else:
                     conn.sendall(b":-1\r\n")
+            elif command == "EXPIRE":
+                key = parts[1]
+                try:
+                    seconds = int(parts[2])
+                    if key in data_store:
+                        expiry_store[key] = time.time() + seconds
+                        conn.sendall(b":1\r\n")
+                    else:
+                        conn.sendall(b":0\r\n")
+                except (IndexError, ValueError):
+                    conn.sendall(b"-ERR invalid arguments\r\n")
             elif command == "INCR":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
