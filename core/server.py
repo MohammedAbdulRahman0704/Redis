@@ -57,6 +57,12 @@ def handle_client(conn, addr):
                 data_store.pop(key, None)
                 expiry_store.pop(key, None)
                 conn.sendall(b"+OK\r\n" if existed else b"$-1\r\n")
+            elif command == "EXISTS":
+                key = parts[1]
+                if key in data_store:
+                    conn.sendall(b":1\r\n")
+                else:
+                    conn.sendall(b":0\r\n")
             elif command == "INCR":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
