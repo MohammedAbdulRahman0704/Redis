@@ -20,17 +20,15 @@ def handle_client(conn, addr):
 
             if command == "PING":
                 conn.sendall(b"+PONG\r\n")
-
             elif command == "ECHO" and len(parts) > 1:
                 message = ' '.join(parts[1:])
                 conn.sendall(f"{message}\r\n".encode())
-
             elif command == "SET":
                 key = parts[1]
                 value = parts[2]
                 data_store[key] = value
 
-                # Handle expiry
+                # Expiry
                 if len(parts) > 4 and parts[3].upper() == "EX":
                     try:
                         seconds = int(parts[4])
@@ -39,13 +37,11 @@ def handle_client(conn, addr):
                         conn.sendall(b"-ERR Invalid expiry time\r\n")
                         continue
                 elif key in expiry_store:
-                    expiry_store.pop(key)  # Remove old expiry if present
+                    expiry_store.pop(key)
 
                 conn.sendall(b"+OK\r\n")
-
             elif command == "GET":
                 key = parts[1]
-                # Check for expiration
                 if key in expiry_store and time.time() > expiry_store[key]:
                     data_store.pop(key, None)
                     expiry_store.pop(key, None)
@@ -55,23 +51,33 @@ def handle_client(conn, addr):
                     conn.sendall(f"${len(value)}\r\n{value}\r\n".encode())
                 else:
                     conn.sendall(b"$-1\r\n")
-
-            elif command == "DEL" and len(parts) == 2:
+            elif command == "DEL":
                 key = parts[1]
-                if key in data_store:
+                existed = key in data_store
+                data_store.pop(key, None)
+                expiry_store.pop(key, None)
+                conn.sendall(b"+OK\r\n" if existed else b"$-1\r\n")
+            elif command == "INCR":
+                key = parts[1]
+                if key in expiry_store and time.time() > expiry_store[key]:
                     data_store.pop(key, None)
                     expiry_store.pop(key, None)
-                    conn.sendall(b"+OK\r\n")
-                else:
-                    conn.sendall(b"$-1\r\n")
 
+                if key not in data_store:
+                    data_store[key] = "0"
+
+                try:
+                    current = int(data_store[key])
+                    current += 1
+                    data_store[key] = str(current)
+                    conn.sendall(f":{current}\r\n".encode())
+                except ValueError:
+                    conn.sendall(b"-ERR value is not an integer\r\n")
             else:
                 conn.sendall(b"-ERR unknown command\r\n")
-
         except Exception as e:
             print(f"Error: {e}")
             break
-
     conn.close()
 
 def start_server(host="127.0.0.1", port=6379):
