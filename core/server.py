@@ -63,6 +63,20 @@ def handle_client(conn, addr):
                     conn.sendall(b":1\r\n")
                 else:
                     conn.sendall(b":0\r\n")
+            elif command == "TTL":
+                key = parts[1]
+                if key not in data_store:
+                    conn.sendall(b":-2\r\n")
+                elif key in expiry_store:
+                    ttl = int(expiry_store[key] - time.time())
+                    if ttl < 0:
+                        data_store.pop(key, None)
+                        expiry_store.pop(key, None)
+                        conn.sendall(b":-2\r\n")
+                    else:
+                        conn.sendall(f":{ttl}\r\n".encode())
+                else:
+                    conn.sendall(b":-1\r\n")
             elif command == "INCR":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
