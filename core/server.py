@@ -1,32 +1,54 @@
 import socket
 import threading
 
-def handle_client(conn, addr):
-    print(f"New connection from {addr}")
+data_store = {}
+
+def handle_client(client_socket, address):
+    print(f"New connection from {address}")
     while True:
         try:
-            data = conn.recv(1024).decode().strip()
+            data = client_socket.recv(1024).decode().strip()
             if not data:
                 break
-            print(f"Received from {addr}: {data}")
-            if data == "PING":
-                response = "+PONG\r\n"
-            elif data.startswith("ECHO"):
-                message = data[5:].strip().strip('"')
-                response = f"{message}\r\n"
+            print(f"Received from {address}: {data}")
+            parts = data.split()
+            if not parts:
+                continue
+
+            command = parts[0].upper()
+
+            if command == "PING":
+                client_socket.sendall(b"+PONG\r\n")
+            elif command == "ECHO":
+                message = " ".join(parts[1:])
+                client_socket.sendall(f"{message}\r\n".encode())
+            elif command == "SET" and len(parts) >= 3:
+                key = parts[1]
+                value = " ".join(parts[2:])
+                data_store[key] = value
+                client_socket.sendall(b"+OK\r\n")
+            elif command == "GET" and len(parts) == 2:
+                key = parts[1]
+                value = data_store.get(key)
+                if value is not None:
+                    client_socket.sendall(f"${len(value)}\r\n{value}\r\n".encode())
+                else:
+                    client_socket.sendall(b"$-1\r\n")
             else:
-                response = "-Unknown command\r\n"
-            conn.sendall(response.encode())
+                client_socket.sendall(b"-ERR unknown command\r\n")
         except ConnectionResetError:
             break
-    conn.close()
 
-def start_server(host="127.0.0.1", port=6379):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((host, port))
-    server_socket.listen()
-    print(f"Redis-like server is running on {host}:{port}...")
+    client_socket.close()
+
+# ✅ Wrap this in a function
+def start_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 6379))
+    server.listen(5)
+    print("Redis-like server is running on 127.0.0.1:6379...")
+
     while True:
-        conn, addr = server_socket.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr))
-        thread.start()
+        client_socket, addr = server.accept()
+        client_handler = threading.Thread(target=handle_client, args=(client_socket, addr))
+        client_handler.start()
