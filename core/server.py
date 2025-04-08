@@ -88,6 +88,13 @@ def handle_client(conn, addr):
                         conn.sendall(b":0\r\n")
                 except (IndexError, ValueError):
                     conn.sendall(b"-ERR invalid arguments\r\n")
+            elif command == "PERSIST":
+                key = parts[1]
+                if key in data_store and key in expiry_store:
+                    expiry_store.pop(key)
+                    conn.sendall(b":1\r\n")
+                else:
+                    conn.sendall(b":0\r\n")
             elif command == "INCR":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
