@@ -5,7 +5,7 @@ import threading
 import time
 from core.rdb_loader import load_rdb
 from core.rdb_saver import save_rdb
-from config import HOST, PORT, RDB_FILE
+from config import HOST, PORT, RDB_FILE, IS_REPLICA
 
 data_store = {}
 expiry_store = {}
@@ -99,11 +99,12 @@ def handle_client(conn, addr):
                 else:
                     conn.sendall(b":0\r\n")
             elif command == "INFO":
+                role = "replica" if IS_REPLICA else "master"
                 info = (
                     "# Server\r\n"
                     "redis_version:0.1\r\n"
                     f"connected_clients:{threading.active_count() - 1}\r\n"
-                    "role:master\r\n"
+                    f"role:{role}\r\n"
                 )
                 conn.sendall(f"${len(info)}\r\n{info}".encode())
             elif command == "INCR":
