@@ -1,7 +1,8 @@
-# core/server.py
 import socket
 import threading
 import time
+from core.rdb_loader import load_rdb
+from core.rdb_saver import save_rdb  # ✅ NEW IMPORT
 
 data_store = {}
 expiry_store = {}
@@ -111,6 +112,9 @@ def handle_client(conn, addr):
                     conn.sendall(f":{current}\r\n".encode())
                 except ValueError:
                     conn.sendall(b"-ERR value is not an integer\r\n")
+            elif command == "SAVE":  # ✅ NEW COMMAND
+                save_rdb("dump.rdb", data_store)
+                conn.sendall(b"+OK\r\n")
             else:
                 conn.sendall(b"-ERR unknown command\r\n")
         except Exception as e:
@@ -119,6 +123,9 @@ def handle_client(conn, addr):
     conn.close()
 
 def start_server(host="127.0.0.1", port=6379):
+    global data_store
+    data_store = load_rdb("dump.rdb")  # ✅ Load RDB on start
+
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
     server_socket.listen()
@@ -129,3 +136,6 @@ def start_server(host="127.0.0.1", port=6379):
         client_socket, addr = server_socket.accept()
         client_thread = threading.Thread(target=handle_client, args=(client_socket, addr))
         client_thread.start()
+
+if __name__ == "__main__":
+    start_server()
