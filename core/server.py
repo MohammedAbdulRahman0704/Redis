@@ -1,8 +1,11 @@
+# core/server.py
+
 import socket
 import threading
 import time
 from core.rdb_loader import load_rdb
-from core.rdb_saver import save_rdb  # ✅ NEW IMPORT
+from core.rdb_saver import save_rdb
+from config import HOST, PORT, RDB_FILE
 
 data_store = {}
 expiry_store = {}
@@ -29,7 +32,6 @@ def handle_client(conn, addr):
                 value = parts[2]
                 data_store[key] = value
 
-                # Expiry
                 if len(parts) > 4 and parts[3].upper() == "EX":
                     try:
                         seconds = int(parts[4])
@@ -112,8 +114,8 @@ def handle_client(conn, addr):
                     conn.sendall(f":{current}\r\n".encode())
                 except ValueError:
                     conn.sendall(b"-ERR value is not an integer\r\n")
-            elif command == "SAVE":  # ✅ NEW COMMAND
-                save_rdb("dump.rdb", data_store)
+            elif command == "SAVE":
+                save_rdb(RDB_FILE, data_store)
                 conn.sendall(b"+OK\r\n")
             else:
                 conn.sendall(b"-ERR unknown command\r\n")
@@ -122,15 +124,15 @@ def handle_client(conn, addr):
             break
     conn.close()
 
-def start_server(host="127.0.0.1", port=6379):
+def start_server():
     global data_store
-    data_store = load_rdb("dump.rdb")  # ✅ Load RDB on start
+    data_store = load_rdb(RDB_FILE)
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((host, port))
+    server_socket.bind((HOST, PORT))
     server_socket.listen()
 
-    print(f"Redis-like server is running on {host}:{port}...")
+    print(f"Redis-like server is running on {HOST}:{PORT}...")
 
     while True:
         client_socket, addr = server_socket.accept()
