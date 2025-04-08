@@ -98,6 +98,14 @@ def handle_client(conn, addr):
                     conn.sendall(b":1\r\n")
                 else:
                     conn.sendall(b":0\r\n")
+            elif command == "INFO":
+                info = (
+                    "# Server\r\n"
+                    "redis_version:0.1\r\n"
+                    f"connected_clients:{threading.active_count() - 1}\r\n"
+                    "role:master\r\n"
+                )
+                conn.sendall(f"${len(info)}\r\n{info}".encode())
             elif command == "INCR":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
