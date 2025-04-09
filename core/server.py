@@ -1,5 +1,3 @@
-# core/server.py
-
 import socket
 import threading
 import time
@@ -11,7 +9,7 @@ from config import HOST, PORT, RDB_FILE, IS_REPLICA
 data_store = {}
 expiry_store = {}
 
-# 🔄 Initialize replication tracking
+
 run_id = str(uuid.uuid4())
 replication_offset = 0
 
@@ -26,6 +24,9 @@ def handle_client(conn, addr):
             print(f"Received from {addr}: {data}")
 
             parts = data.split()
+            if not parts:
+                continue
+
             command = parts[0].upper()
 
             if command == "PING":
@@ -39,7 +40,7 @@ def handle_client(conn, addr):
                 key = parts[1]
                 value = parts[2]
                 data_store[key] = value
-                replication_offset += 1  # 🔄 Increment offset
+                replication_offset += 1  
 
                 if len(parts) > 4 and parts[3].upper() == "EX":
                     try:
@@ -71,7 +72,7 @@ def handle_client(conn, addr):
                 data_store.pop(key, None)
                 expiry_store.pop(key, None)
                 if existed:
-                    replication_offset += 1  # 🔄 Increment offset
+                    replication_offset += 1  
                     conn.sendall(b"+OK\r\n")
                 else:
                     conn.sendall(b"$-1\r\n")
@@ -101,7 +102,7 @@ def handle_client(conn, addr):
                     seconds = int(parts[2])
                     if key in data_store:
                         expiry_store[key] = time.time() + seconds
-                        replication_offset += 1  # 🔄 Increment offset
+                        replication_offset += 1 
                         conn.sendall(b":1\r\n")
                     else:
                         conn.sendall(b":0\r\n")
@@ -112,7 +113,7 @@ def handle_client(conn, addr):
                 key = parts[1]
                 if key in data_store and key in expiry_store:
                     expiry_store.pop(key)
-                    replication_offset += 1  # 🔄 Increment offset
+                    replication_offset += 1  
                     conn.sendall(b":1\r\n")
                 else:
                     conn.sendall(b":0\r\n")
@@ -127,6 +128,14 @@ def handle_client(conn, addr):
                 )
                 conn.sendall(f"${len(info)}\r\n{info}".encode())
 
+            elif parts[0].upper() == "REPLCONF":
+                if len(parts) >= 3 and parts[1].lower() == "listening-port":
+                    port = parts[2]
+                    print(f"Replica handshake received. Replica is listening on port {port}")
+                    conn.sendall(b"+OK\r\n")
+                else:
+                    conn.sendall(b"-ERR unknown REPLCONF subcommand\r\n")
+
             elif command == "INCR":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
@@ -140,7 +149,7 @@ def handle_client(conn, addr):
                     current = int(data_store[key])
                     current += 1
                     data_store[key] = str(current)
-                    replication_offset += 1  # 🔄 Increment offset
+                    replication_offset += 1  
                     conn.sendall(f":{current}\r\n".encode())
                 except ValueError:
                     conn.sendall(b"-ERR value is not an integer\r\n")
