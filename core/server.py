@@ -12,9 +12,23 @@ expiry_store = {}
 run_id = str(uuid.uuid4())
 replication_offset = 0
 
+replica_clients = []  # Track all connected replicas
+
+def propagate_to_replicas(command_str):
+    """
+    Send command to all connected replicas.
+    """
+    for replica in replica_clients:
+        try:
+            replica.sendall(command_str.encode())
+        except Exception as e:
+            print(f"Failed to propagate to replica: {e}")
+
 def handle_client(conn, addr):
     global replication_offset
     print(f"New connection from {addr}")
+    is_replica = False  # Track whether this client is a replica
+
     while True:
         try:
             data = conn.recv(1024).decode().strip()
@@ -53,6 +67,10 @@ def handle_client(conn, addr):
 
                 conn.sendall(b"+OK\r\n")
 
+                # Propagate SET command to all replicas
+                if not is_replica:
+                    propagate_to_replicas(data + "\r\n")
+
             elif command == "GET":
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
@@ -73,6 +91,8 @@ def handle_client(conn, addr):
                 if existed:
                     replication_offset += 1
                     conn.sendall(b"+OK\r\n")
+                    if not is_replica:
+                        propagate_to_replicas(data + "\r\n")
                 else:
                     conn.sendall(b"$-1\r\n")
 
@@ -103,6 +123,8 @@ def handle_client(conn, addr):
                         expiry_store[key] = time.time() + seconds
                         replication_offset += 1
                         conn.sendall(b":1\r\n")
+                        if not is_replica:
+                            propagate_to_replicas(data + "\r\n")
                     else:
                         conn.sendall(b":0\r\n")
                 except (IndexError, ValueError):
@@ -114,6 +136,8 @@ def handle_client(conn, addr):
                     expiry_store.pop(key)
                     replication_offset += 1
                     conn.sendall(b":1\r\n")
+                    if not is_replica:
+                        propagate_to_replicas(data + "\r\n")
                 else:
                     conn.sendall(b":0\r\n")
 
@@ -131,6 +155,8 @@ def handle_client(conn, addr):
                 if len(parts) >= 3 and parts[1].lower() == "listening-port":
                     port = parts[2]
                     print(f"Replica handshake received. Replica is listening on port {port}")
+                    is_replica = True
+                    replica_clients.append(conn)  # Add to list of replicas
                     conn.sendall(b"+OK\r\n")
                 elif len(parts) >= 3 and parts[1].lower() == "capa" and parts[2].lower() == "psync2":
                     print("Replica supports PSYNC2")
@@ -163,6 +189,8 @@ def handle_client(conn, addr):
                     data_store[key] = str(current)
                     replication_offset += 1
                     conn.sendall(f":{current}\r\n".encode())
+                    if not is_replica:
+                        propagate_to_replicas(data + "\r\n")
                 except ValueError:
                     conn.sendall(b"-ERR value is not an integer\r\n")
 
@@ -183,6 +211,10 @@ def handle_client(conn, addr):
         except Exception as e:
             print(f"Error: {e}")
             break
+
+    if is_replica and conn in replica_clients:
+        replica_clients.remove(conn)
+
     conn.close()
 
 def start_server():

@@ -136,18 +136,28 @@ import socket
 REPLICA_PORT = 6380
 MASTER_HOST = 'localhost'
 MASTER_PORT = 6379
+IS_REPLICA = True
 
 def send_and_receive(sock, message):
     print(f"\n🤝 Sending: {message}")
-    sock.sendall((message + '\r\n').encode())
-    response = sock.recv(4096).decode()
-    print(f"📥 Response:\n {response}")
-    return response
+    try:
+        sock.sendall((message + '\r\n').encode())
+        response = sock.recv(4096).decode()
+        print(f"📥 Response:\n{response}")
+        return response
+    except Exception as e:
+        print(f"❌ Communication error: {e}")
+        return ""
 
 def connect_to_master():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((MASTER_HOST, MASTER_PORT))
-    return sock
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((MASTER_HOST, MASTER_PORT))
+        print(f"✅ Connected to master at {MASTER_HOST}:{MASTER_PORT}")
+        return sock
+    except Exception as e:
+        print(f"❌ Failed to connect to master: {e}")
+        exit(1)
 
 def parse_fullresync(response):
     lines = response.strip().split()
@@ -162,46 +172,46 @@ def parse_fullresync(response):
 
 def receive_rdb(sock):
     print("📦 Receiving RDB dump...")
-    first_byte = sock.recv(1)
-    if not first_byte:
-        print("❌ Failed to receive RDB.")
-        return
-    data = first_byte
-    sock.settimeout(0.5)  # short read timeout for RDB
-
     try:
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-    except socket.timeout:
-        pass
+        first_byte = sock.recv(1)
+        if not first_byte:
+            print("❌ Failed to receive RDB.")
+            return
 
-    with open("replica_dump.rdb", "wb") as f:
-        f.write(data)
-    print(f"✅ RDB received ({len(data)} bytes)\n💾 RDB saved as 'replica_dump.rdb'")
+        data = first_byte
+        sock.settimeout(0.5)
+
+        while True:
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
+                break
+
+        with open("replica_dump.rdb", "wb") as f:
+            f.write(data)
+        print(f"✅ RDB received ({len(data)} bytes)\n💾 Saved as 'replica_dump.rdb'")
+    except Exception as e:
+        print(f"❌ Error receiving RDB: {e}")
 
 def parse_resp_command(buffer):
-    """
-    Parses RESP array commands like: *3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n
-    Returns list of commands if fully received, else None.
-    """
     try:
         if not buffer.startswith(b'*'):
             return None, buffer
 
         lines = buffer.split(b'\r\n')
         if len(lines) < 3:
-            return None, buffer  # not enough lines
+            return None, buffer
 
-        argc = int(lines[0][1:])  # e.g., *3
+        argc = int(lines[0][1:])
         args = []
         i = 1
         while i < len(lines) - 1:
             if lines[i].startswith(b'$'):
                 if i + 1 >= len(lines):
-                    return None, buffer  # incomplete
+                    return None, buffer
                 args.append(lines[i + 1].decode())
                 i += 2
             else:
@@ -210,20 +220,25 @@ def parse_resp_command(buffer):
         if len(args) != argc:
             return None, buffer
 
-        # Calculate how much of the buffer we consumed
-        consumed_len = 0
-        for arg in lines[:i]:
-            consumed_len += len(arg) + 2  # +2 for \r\n
-
+        consumed_len = sum(len(line) + 2 for line in lines[:i])
         remaining = buffer[consumed_len:]
         return args, remaining
 
     except Exception as e:
         return None, buffer
 
+def simulate_command_execution(command):
+    cmd = command[0].upper()
+    if cmd == "SET" and len(command) == 3:
+        print(f"🧠 Simulated SET: {command[1]} = {command[2]}")
+    elif cmd == "DEL" and len(command) == 2:
+        print(f"🧠 Simulated DEL: {command[1]}")
+    else:
+        print(f"🧪 Simulated Command: {command}")
+
 def listen_for_commands(sock):
     print("\n🔄 Listening for command propagation from master...")
-    sock.settimeout(None)  # reset timeout to blocking mode
+    sock.settimeout(None)
     buffer = b""
 
     try:
@@ -237,10 +252,11 @@ def listen_for_commands(sock):
                 command, buffer = parse_resp_command(buffer)
                 if command:
                     print(f"📬 Command from master: {command}")
+                    simulate_command_execution(command)
                 else:
-                    break  # wait for more data
+                    break
     except KeyboardInterrupt:
-        print("🛑 Stopped listening.")
+        print("🛑 Stopped by user.")
     except Exception as e:
         print(f"❌ Error: {e}")
     finally:
