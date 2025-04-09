@@ -1,5 +1,3 @@
-# server.py
-
 import socket
 import threading
 import time
@@ -142,11 +140,8 @@ def handle_client(conn, addr):
 
             elif command == "PSYNC":
                 if len(parts) == 3 and parts[1] == "?" and parts[2] == "-1":
-                    # Send FULLRESYNC response
                     response = f"+FULLRESYNC {run_id} {replication_offset}\r\n"
                     conn.sendall(response.encode())
-
-                    # Send serialized RDB data as bytes
                     rdb_data = save_rdb(RDB_FILE, data_store, return_bytes=True)
                     conn.sendall(f"${len(rdb_data)}\r\n".encode())
                     conn.sendall(rdb_data)
