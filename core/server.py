@@ -1,3 +1,5 @@
+# server.py
+
 import socket
 import threading
 import time
@@ -127,7 +129,7 @@ def handle_client(conn, addr):
                 )
                 conn.sendall(f"${len(info)}\r\n{info}".encode())
 
-            elif parts[0].upper() == "REPLCONF":
+            elif command == "REPLCONF":
                 if len(parts) >= 3 and parts[1].lower() == "listening-port":
                     port = parts[2]
                     print(f"Replica handshake received. Replica is listening on port {port}")
@@ -139,9 +141,15 @@ def handle_client(conn, addr):
                     conn.sendall(b"-ERR unknown REPLCONF subcommand\r\n")
 
             elif command == "PSYNC":
-                if len(parts) >= 3 and parts[1] == "?" and parts[2] == "-1":
+                if len(parts) == 3 and parts[1] == "?" and parts[2] == "-1":
+                    # Send FULLRESYNC response
                     response = f"+FULLRESYNC {run_id} {replication_offset}\r\n"
                     conn.sendall(response.encode())
+
+                    # Send serialized RDB data as bytes
+                    rdb_data = save_rdb(RDB_FILE, data_store, return_bytes=True)
+                    conn.sendall(f"${len(rdb_data)}\r\n".encode())
+                    conn.sendall(rdb_data)
                 else:
                     conn.sendall(b"-ERR PSYNC not supported for partial resync\r\n")
 
