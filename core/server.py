@@ -16,7 +16,7 @@ replica_clients = []
 
 # Load RDB if it exists
 data_store.update(load_rdb(RDB_FILE))
-
+client_states = {}
 
 def propagate_to_replicas(command_str):
     for replica in replica_clients:
@@ -25,9 +25,17 @@ def propagate_to_replicas(command_str):
         except Exception as e:
             print(f"Failed to propagate to replica: {e}")
 
+def queue_command(client_id, command_str):
+    if client_states[client_id]['in_multi']:
+        client_states[client_id]['queue'].append(command_str)
+        return True
+    return False
 
 def handle_client(conn, addr):
     global replication_offset
+    client_id = str(uuid.uuid4())
+    client_states[client_id] = {"in_multi": False, "queue": []}
+
     print(f"New connection from {addr}")
     is_replica = False
 
@@ -44,6 +52,60 @@ def handle_client(conn, addr):
 
             command = parts[0].upper()
 
+            # MULTI
+            if command == "MULTI":
+                client_states[client_id]["in_multi"] = True
+                client_states[client_id]["queue"] = []
+                conn.sendall(b"+OK\r\n")
+                continue
+
+            # DISCARD
+            if command == "DISCARD":
+                if not client_states[client_id]["in_multi"]:
+                    conn.sendall(b"-ERR DISCARD without MULTI\r\n")
+                else:
+                    client_states[client_id]["in_multi"] = False
+                    client_states[client_id]["queue"].clear()
+                    conn.sendall(b"+OK\r\n")
+                continue
+
+            # EXEC
+            if command == "EXEC":
+                if not client_states[client_id]["in_multi"]:
+                    conn.sendall(b"-ERR EXEC without MULTI\r\n")
+                    continue
+
+                responses = []
+                for queued_cmd in client_states[client_id]["queue"]:
+                    inner_parts = queued_cmd.split()
+                    if not inner_parts:
+                        continue
+                    cmd = inner_parts[0].upper()
+                    if cmd == "SET" and len(inner_parts) >= 3:
+                        key, value = inner_parts[1], inner_parts[2]
+                        data_store[key] = value
+                        replication_offset += 1
+                        if not is_replica:
+                            propagate_to_replicas(queued_cmd + "\r\n")
+                        responses.append("+OK")
+                    else:
+                        responses.append(f"-ERR unsupported command in MULTI: {cmd}")
+
+                conn.sendall(f"*{len(responses)}\r\n".encode())
+                for resp in responses:
+                    conn.sendall(f"{resp}\r\n".encode())
+
+                client_states[client_id]["in_multi"] = False
+                client_states[client_id]["queue"].clear()
+                continue
+
+            # Queue command if in MULTI
+            if client_states[client_id]["in_multi"]:
+                queue_command(client_id, data)
+                conn.sendall(b"+QUEUED\r\n")
+                continue
+
+            # Handle other commands
             if command == "PING":
                 conn.sendall(b"+PONG\r\n")
 
@@ -53,16 +115,14 @@ def handle_client(conn, addr):
 
             elif command == "SET":
                 if len(parts) < 3:
-                    conn.sendall(b"-ERR wrong number of arguments for 'SET' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'SET'\r\n")
                     continue
-                key = parts[1]
-                value = parts[2]
+                key, value = parts[1], parts[2]
                 data_store[key] = value
                 replication_offset += 1
                 if len(parts) > 4 and parts[3].upper() == "EX":
                     try:
-                        seconds = int(parts[4])
-                        expiry_store[key] = time.time() + seconds
+                        expiry_store[key] = time.time() + int(parts[4])
                     except ValueError:
                         conn.sendall(b"-ERR Invalid expiry time\r\n")
                         continue
@@ -74,7 +134,7 @@ def handle_client(conn, addr):
 
             elif command == "GET":
                 if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'GET' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'GET'\r\n")
                     continue
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
@@ -87,51 +147,30 @@ def handle_client(conn, addr):
                 else:
                     conn.sendall(b"$-1\r\n")
 
-            elif command == "TYPE":
-                if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'TYPE' command\r\n")
-                else:
-                    key = parts[1]
-                    if key not in data_store and key not in streams:
-                        conn.sendall(b"+none\r\n")
-                    elif isinstance(data_store.get(key), str):
-                        conn.sendall(b"+string\r\n")
-                    elif isinstance(data_store.get(key), list):
-                        conn.sendall(b"+list\r\n")
-                    elif isinstance(data_store.get(key), dict):
-                        conn.sendall(b"+hash\r\n")
-                    elif key in streams:
-                        conn.sendall(b"+stream\r\n")
-                    else:
-                        conn.sendall(b"+unknown\r\n")
-
             elif command == "DEL":
                 if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'DEL' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'DEL'\r\n")
                     continue
                 key = parts[1]
                 existed = key in data_store or key in streams
                 data_store.pop(key, None)
                 streams.pop(key, None)
                 expiry_store.pop(key, None)
-                if existed:
+                conn.sendall(b":1\r\n" if existed else b":0\r\n")
+                if existed and not is_replica:
                     replication_offset += 1
-                    conn.sendall(b":1\r\n")
-                    if not is_replica:
-                        propagate_to_replicas(data + "\r\n")
-                else:
-                    conn.sendall(b":0\r\n")
+                    propagate_to_replicas(data + "\r\n")
 
             elif command == "EXISTS":
                 if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'EXISTS' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'EXISTS'\r\n")
                     continue
                 key = parts[1]
                 conn.sendall(b":1\r\n" if key in data_store or key in streams else b":0\r\n")
 
             elif command == "TTL":
                 if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'TTL' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'TTL'\r\n")
                     continue
                 key = parts[1]
                 if key not in data_store:
@@ -164,7 +203,7 @@ def handle_client(conn, addr):
 
             elif command == "PERSIST":
                 if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'PERSIST' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'PERSIST'\r\n")
                     continue
                 key = parts[1]
                 if key in data_store and key in expiry_store:
@@ -178,7 +217,7 @@ def handle_client(conn, addr):
 
             elif command == "INCR":
                 if len(parts) != 2:
-                    conn.sendall(b"-ERR wrong number of arguments for 'INCR' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'INCR'\r\n")
                     continue
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
@@ -199,7 +238,7 @@ def handle_client(conn, addr):
 
             elif command == "XADD":
                 if len(parts) < 5:
-                    conn.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
+                    conn.sendall(b"-ERR wrong number of arguments for 'XADD'\r\n")
                     continue
 
                 stream_name = parts[1]
@@ -219,10 +258,7 @@ def handle_client(conn, addr):
                 if stream_name not in streams:
                     streams[stream_name] = []
 
-                streams[stream_name].append({
-                    "id": entry_id,
-                    "fields": fields
-                })
+                streams[stream_name].append({"id": entry_id, "fields": fields})
 
                 replication_offset += 1
                 conn.sendall(f"${len(entry_id)}\r\n{entry_id}\r\n".encode())
@@ -253,9 +289,8 @@ def handle_client(conn, addr):
                     block = None
                     count = None
                     streams_index = None
-
-                    # Parse BLOCK and COUNT
                     i = 1
+
                     while i < len(parts):
                         if parts[i].upper() == "BLOCK":
                             block = int(parts[i + 1])
@@ -305,70 +340,31 @@ def handle_client(conn, addr):
                             conn.sendall(f"*{len(result)}\r\n".encode() + "".join(result).encode())
                             break
 
-                        if block is None:
-                            # No blocking and no result
+                        if block is None or (time.time() - start_time) * 1000 >= block:
                             conn.sendall(b"$-1\r\n")
                             break
 
-                        if block >= 0 and (time.time() - start_time) * 1000 >= block:
-                            # Timeout reached
-                            conn.sendall(b"$-1\r\n")
-                            break
-
-                        time.sleep(0.1)  # Prevents tight loop
-
+                        time.sleep(0.1)
                 except Exception as e:
                     conn.sendall(f"-ERR XREAD error: {str(e)}\r\n".encode())
 
-
-            elif command == "SAVE":
-                save_rdb(RDB_FILE, data_store)
-                conn.sendall(b"+OK\r\n")
-
-            elif command == "RUN_ID":
-                response = f"*2\r\n$7\r\nrun_id\r\n${len(run_id)}\r\n{run_id}\r\n"
-                conn.sendall(response.encode())
-
-            elif command == "OFFSET":
-                conn.sendall(f":{replication_offset}\r\n".encode())
-
-            elif command == "INFO":
-                role = "replica" if IS_REPLICA else "master"
-                info = (
-                    "# Server\r\n"
-                    "redis_version:0.1\r\n"
-                    f"connected_clients:{threading.active_count() - 1}\r\n"
-                    f"role:{role}\r\n"
-                )
-                conn.sendall(f"${len(info)}\r\n{info}".encode())
-
-            elif command == "REPLCONF":
-                # Basic REPLCONF support
-                conn.sendall(b"+OK\r\n")
-                is_replica = True
-                replica_clients.append(conn)
-
-            else:
-                conn.sendall(b"-ERR unknown command\r\n")
-
         except Exception as e:
-            print(f"Exception handling client {addr}: {e}")
+            print(f"Error with client {addr}: {e}")
             break
 
     conn.close()
-    print(f"Connection closed: {addr}")
-
+    print(f"Connection closed from {addr}")
 
 def start_server():
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((HOST, PORT))
-    server_socket.listen(5)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((HOST, PORT))
+    server.listen()
     print(f"Server listening on {HOST}:{PORT}")
 
     while True:
-        conn, addr = server_socket.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-
+        conn, addr = server.accept()
+        thread = threading.Thread(target=handle_client, args=(conn, addr))
+        thread.start()
 
 if __name__ == "__main__":
     start_server()
