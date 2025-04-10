@@ -250,49 +250,76 @@ def handle_client(conn, addr):
 
             elif command == "XREAD":
                 try:
-                    if "STREAMS" not in parts:
+                    block = None
+                    count = None
+                    streams_index = None
+
+                    # Parse BLOCK and COUNT
+                    i = 1
+                    while i < len(parts):
+                        if parts[i].upper() == "BLOCK":
+                            block = int(parts[i + 1])
+                            i += 2
+                        elif parts[i].upper() == "COUNT":
+                            count = int(parts[i + 1])
+                            i += 2
+                        elif parts[i].upper() == "STREAMS":
+                            streams_index = i
+                            break
+                        else:
+                            i += 1
+
+                    if streams_index is None:
                         conn.sendall(b"-ERR missing STREAMS keyword\r\n")
                         continue
 
-                    streams_index = parts.index("STREAMS")
-                    count = None
-                    if parts[1].upper() == "COUNT":
-                        count = int(parts[2])
-                        stream_names = parts[streams_index + 1:streams_index + 1 + (len(parts) - streams_index - 1) // 2]
-                        start_ids = parts[streams_index + 1 + len(stream_names):]
-                    else:
-                        stream_names = parts[streams_index + 1:streams_index + 2]
-                        start_ids = parts[streams_index + 2:]
+                    stream_names = parts[streams_index + 1 : streams_index + 1 + (len(parts) - streams_index - 1) // 2]
+                    start_ids = parts[streams_index + 1 + len(stream_names):]
 
                     if len(stream_names) != len(start_ids):
                         conn.sendall(b"-ERR stream names and IDs count mismatch\r\n")
                         continue
 
-                    result = []
-                    for stream_name, start_id in zip(stream_names, start_ids):
-                        stream = streams.get(stream_name, [])
-                        matching = [entry for entry in stream if entry["id"] > start_id]
-                        if count is not None:
-                            matching = matching[:count]
+                    start_time = time.time()
 
-                        if matching:
-                            result.append(f"${len(stream_name)}\r\n{stream_name}\r\n")
-                            result.append(f"*{len(matching)}\r\n")
-                            for entry in matching:
-                                entry_id = entry["id"]
-                                fields = entry["fields"]
-                                result.append(f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n")
-                                result.append(f"*{len(fields) * 2}\r\n")
-                                for k, v in fields.items():
-                                    result.append(f"${len(k)}\r\n{k}\r\n${len(v)}\r\n{v}\r\n")
+                    while True:
+                        result = []
+                        for stream_name, start_id in zip(stream_names, start_ids):
+                            stream = streams.get(stream_name, [])
+                            matching = [entry for entry in stream if entry["id"] > start_id]
+                            if count is not None:
+                                matching = matching[:count]
 
-                    if result:
-                        conn.sendall(f"*{len(result)}\r\n".encode() + "".join(result).encode())
-                    else:
-                        conn.sendall(b"$-1\r\n")
+                            if matching:
+                                result.append(f"${len(stream_name)}\r\n{stream_name}\r\n")
+                                result.append(f"*{len(matching)}\r\n")
+                                for entry in matching:
+                                    entry_id = entry["id"]
+                                    fields = entry["fields"]
+                                    result.append(f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n")
+                                    result.append(f"*{len(fields) * 2}\r\n")
+                                    for k, v in fields.items():
+                                        result.append(f"${len(k)}\r\n{k}\r\n${len(v)}\r\n{v}\r\n")
+
+                        if result:
+                            conn.sendall(f"*{len(result)}\r\n".encode() + "".join(result).encode())
+                            break
+
+                        if block is None:
+                            # No blocking and no result
+                            conn.sendall(b"$-1\r\n")
+                            break
+
+                        if block >= 0 and (time.time() - start_time) * 1000 >= block:
+                            # Timeout reached
+                            conn.sendall(b"$-1\r\n")
+                            break
+
+                        time.sleep(0.1)  # Prevents tight loop
 
                 except Exception as e:
                     conn.sendall(f"-ERR XREAD error: {str(e)}\r\n".encode())
+
 
             elif command == "SAVE":
                 save_rdb(RDB_FILE, data_store)
