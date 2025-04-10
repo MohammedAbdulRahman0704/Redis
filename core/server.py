@@ -14,20 +14,19 @@ replication_offset = 0
 
 replica_clients = []  # Track all connected replicas
 
+
 def propagate_to_replicas(command_str):
-    """
-    Send command to all connected replicas.
-    """
     for replica in replica_clients:
         try:
             replica.sendall(command_str.encode())
         except Exception as e:
             print(f"Failed to propagate to replica: {e}")
 
+
 def handle_client(conn, addr):
     global replication_offset
     print(f"New connection from {addr}")
-    is_replica = False  # Track whether this client is a replica
+    is_replica = False
 
     while True:
         try:
@@ -50,6 +49,10 @@ def handle_client(conn, addr):
                 conn.sendall(f"{message}\r\n".encode())
 
             elif command == "SET":
+                if len(parts) < 3:
+                    conn.sendall(b"-ERR wrong number of arguments for 'SET' command\r\n")
+                    continue
+
                 key = parts[1]
                 value = parts[2]
                 data_store[key] = value
@@ -66,12 +69,14 @@ def handle_client(conn, addr):
                     expiry_store.pop(key)
 
                 conn.sendall(b"+OK\r\n")
-
-                # Propagate SET command to all replicas
                 if not is_replica:
                     propagate_to_replicas(data + "\r\n")
 
             elif command == "GET":
+                if len(parts) != 2:
+                    conn.sendall(b"-ERR wrong number of arguments for 'GET' command\r\n")
+                    continue
+
                 key = parts[1]
                 if key in expiry_store and time.time() > expiry_store[key]:
                     data_store.pop(key, None)
@@ -83,11 +88,32 @@ def handle_client(conn, addr):
                 else:
                     conn.sendall(b"$-1\r\n")
 
+            elif command == "TYPE":
+                if len(parts) != 2:
+                    conn.sendall(b"-ERR wrong number of arguments for 'TYPE' command\r\n")
+                else:
+                    key = parts[1]
+                    if key not in data_store:
+                        conn.sendall(b"+none\r\n")
+                    elif isinstance(data_store[key], str):
+                        conn.sendall(b"+string\r\n")
+                    elif isinstance(data_store[key], list):
+                        conn.sendall(b"+list\r\n")
+                    elif isinstance(data_store[key], dict):
+                        conn.sendall(b"+hash\r\n")
+                    else:
+                        conn.sendall(b"+unknown\r\n")
+
             elif command == "DEL":
+                if len(parts) != 2:
+                    conn.sendall(b"-ERR wrong number of arguments for 'DEL' command\r\n")
+                    continue
+
                 key = parts[1]
                 existed = key in data_store
                 data_store.pop(key, None)
                 expiry_store.pop(key, None)
+
                 if existed:
                     replication_offset += 1
                     conn.sendall(b"+OK\r\n")
@@ -97,6 +123,10 @@ def handle_client(conn, addr):
                     conn.sendall(b"$-1\r\n")
 
             elif command == "EXISTS":
+                if len(parts) != 2:
+                    conn.sendall(b"-ERR wrong number of arguments for 'EXISTS' command\r\n")
+                    continue
+
                 key = parts[1]
                 conn.sendall(b":1\r\n" if key in data_store else b":0\r\n")
 
@@ -116,8 +146,8 @@ def handle_client(conn, addr):
                     conn.sendall(b":-1\r\n")
 
             elif command == "EXPIRE":
-                key = parts[1]
                 try:
+                    key = parts[1]
                     seconds = int(parts[2])
                     if key in data_store:
                         expiry_store[key] = time.time() + seconds
@@ -140,39 +170,6 @@ def handle_client(conn, addr):
                         propagate_to_replicas(data + "\r\n")
                 else:
                     conn.sendall(b":0\r\n")
-
-            elif command == "INFO":
-                role = "replica" if IS_REPLICA else "master"
-                info = (
-                    "# Server\r\n"
-                    "redis_version:0.1\r\n"
-                    f"connected_clients:{threading.active_count() - 1}\r\n"
-                    f"role:{role}\r\n"
-                )
-                conn.sendall(f"${len(info)}\r\n{info}".encode())
-
-            elif command == "REPLCONF":
-                if len(parts) >= 3 and parts[1].lower() == "listening-port":
-                    port = parts[2]
-                    print(f"Replica handshake received. Replica is listening on port {port}")
-                    is_replica = True
-                    replica_clients.append(conn)  # Add to list of replicas
-                    conn.sendall(b"+OK\r\n")
-                elif len(parts) >= 3 and parts[1].lower() == "capa" and parts[2].lower() == "psync2":
-                    print("Replica supports PSYNC2")
-                    conn.sendall(b"+OK\r\n")
-                else:
-                    conn.sendall(b"-ERR unknown REPLCONF subcommand\r\n")
-
-            elif command == "PSYNC":
-                if len(parts) == 3 and parts[1] == "?" and parts[2] == "-1":
-                    response = f"+FULLRESYNC {run_id} {replication_offset}\r\n"
-                    conn.sendall(response.encode())
-                    rdb_data = save_rdb(RDB_FILE, data_store, return_bytes=True)
-                    conn.sendall(f"${len(rdb_data)}\r\n".encode())
-                    conn.sendall(rdb_data)
-                else:
-                    conn.sendall(b"-ERR PSYNC not supported for partial resync\r\n")
 
             elif command == "INCR":
                 key = parts[1]
@@ -205,6 +202,39 @@ def handle_client(conn, addr):
             elif command == "OFFSET":
                 conn.sendall(f":{replication_offset}\r\n".encode())
 
+            elif command == "INFO":
+                role = "replica" if IS_REPLICA else "master"
+                info = (
+                    "# Server\r\n"
+                    "redis_version:0.1\r\n"
+                    f"connected_clients:{threading.active_count() - 1}\r\n"
+                    f"role:{role}\r\n"
+                )
+                conn.sendall(f"${len(info)}\r\n{info}".encode())
+
+            elif command == "REPLCONF":
+                if len(parts) >= 3 and parts[1].lower() == "listening-port":
+                    port = parts[2]
+                    print(f"Replica handshake received. Replica is listening on port {port}")
+                    is_replica = True
+                    replica_clients.append(conn)
+                    conn.sendall(b"+OK\r\n")
+                elif len(parts) >= 3 and parts[1].lower() == "capa" and parts[2].lower() == "psync2":
+                    print("Replica supports PSYNC2")
+                    conn.sendall(b"+OK\r\n")
+                else:
+                    conn.sendall(b"-ERR unknown REPLCONF subcommand\r\n")
+
+            elif command == "PSYNC":
+                if len(parts) == 3 and parts[1] == "?" and parts[2] == "-1":
+                    response = f"+FULLRESYNC {run_id} {replication_offset}\r\n"
+                    conn.sendall(response.encode())
+                    rdb_data = save_rdb(RDB_FILE, data_store, return_bytes=True)
+                    conn.sendall(f"${len(rdb_data)}\r\n".encode())
+                    conn.sendall(rdb_data)
+                else:
+                    conn.sendall(b"-ERR PSYNC not supported for partial resync\r\n")
+
             else:
                 conn.sendall(b"-ERR unknown command\r\n")
 
@@ -216,6 +246,7 @@ def handle_client(conn, addr):
         replica_clients.remove(conn)
 
     conn.close()
+
 
 def start_server():
     global data_store
